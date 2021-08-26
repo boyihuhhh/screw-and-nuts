@@ -1,0 +1,441 @@
+import cv2
+import time
+import socket
+import numpy as n
+import pyrealsense2 as rs
+
+### initial config
+
+def linear_regression(x, y):
+    '''
+    calc the linear regression of [x, y] \n
+    @param x, y: numpy.ndarray. 
+    NOTE: x, y should have the same size \n
+    @return value numpy.ndarray[b, k]: b is the constant coefficient, 
+    and k is the linear coefficient.
+    '''
+    if x.size != y.size:
+        raise ValueError
+    N = x.size
+    x = x.copy()
+    y = y.copy()
+    sumx = np.sum(x)
+    sumy = np.sum(y)
+    sumx2 = np.sum(x ** 2)
+    sumxy = np.sum(x * y)
+    A = np.mat([[N, sumx], [sumx, sumx2]])
+    b = np.array([sumy, sumxy])
+    return np.linalg.solve(A, b)
+def getTime():
+    return time.strftime("%H:%M:%S", time.localtime())
+class PartImg:
+    def __init__(self):
+        self.contour = None
+        self.rgbRoi = None
+        self.dRoi = None
+        self.invalid = None
+        self.bx = None
+        self.by = None
+        self.bw = None
+        self.bh = None
+        self.roix = None
+        self.roiy = None
+        self.roiw = None
+        self.roih = None
+        self.mx = None
+        self.my = None
+        self.mw = None
+        self.mh = None
+        self.pickx = None
+        self.picky = None
+        self.type = None
+
+model_dir = 'D:\Robots\DualRobots0820\model\deep-learning-model\model0813b\\'
+
+print("\033[0;34m%s\033[0m" % (getTime()+" 程序已启动"))  # 调成蓝色
+print("\033[0;34m%s\033[0m" % (getTime()+" 开始初始化程序"))
+
+from cvzone import ClassificationModule
+partsClassifier = ClassificationModule.Classifier(model_dir+'keras_model.h5', model_dir+'labels.txt')
+indexMap = {0: 'long', 1: 'short', 2: 'nut'}
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # 创建服务器
+server.bind(("0.0.0.0", 30001)) 
+server.listen() 
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 等待客户端连接"))
+conn, addr = server.accept() # 等待socket客户端连接（该行会阻塞程序直到有连接）
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 客户端已连接"))
+
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始启动相机"))
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+align_to = rs.stream.color
+align = rs.align(align_to)
+
+# Start streaming
+profile = pipeline.start(config)
+
+sensor = pipeline.get_active_profile().get_device().query_sensors()[1]
+# sensor.set_option(rs.option.enable_auto_exposure, True)
+sensor.set_option(rs.option.exposure, 250.000)
+
+depth_sensor = profile.get_device().first_depth_sensor()
+depth_scale = depth_sensor.get_depth_scale()
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 相机启动完成"))
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "depth_scale", depth_scale))
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 初始化完成"))
+
+###### init
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始机器人位置初始化"))
+# send
+msg = 'action:init'
+conn.sendall((msg+'\n').encode())
+# recv
+recv_msg = conn.recv(1024)
+recv_msg = recv_msg.decode()
+infos = recv_msg.split(';')
+# print(infos)
+for info in infos:
+    label, value = info.split(':')
+    print(label, value)
+    if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+        print('ok')
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 机器人位置初始化完成"))
+
+###### step 1.1.1
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始校准z角度"))
+while True:
+    frames = pipeline.wait_for_frames()
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.get_depth_frame()
+    color_frame = aligned_frames.get_color_frame()
+    depth_image = np.asanyarray(depth_frame.get_data())
+    color_image = np.asanyarray(color_frame.get_data())
+
+    check, corners = cv2.findChessboardCornersSB(color_image, (3,4))
+    horizontalK = []
+
+    for i in range(0, 3):
+        b, k = linear_regression(corners[i:i+10:3, 0, 0], corners[i:i+10:3, 0, 1])
+        horizontalK.append(k)
+
+    print(horizontalK)
+    meanHorizontalK = np.mean(horizontalK)
+    angleInRadians = np.arctan(meanHorizontalK)
+    if np.abs(angleInRadians) < 0.01:
+        break
+    # print(np.abs(angleInRadians),'in rad.', 'robot:', 'clockwise' if angleInRadians>0 else 'anti-clockwise')
+    # send
+    # msg = 'action:move;relativePos:0,0,0,%s%.3f,0,0'%('-'if angleInRadians>0 else '', np.abs(angleInRadians))
+    msg = 'action:move;relativePos:0,0,0,%s,0,0'%(-angleInRadians)
+    conn.sendall((msg+'\n').encode())
+    # recv
+    recv_msg = conn.recv(1024)
+    recv_msg = recv_msg.decode()
+    infos = recv_msg.split(';')
+    # print(infos)
+    for info in infos:
+        label, value = info.split(':')
+        if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+            print('ok @ 1.1.1')
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "z angle(rad): ", angleInRadians))
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 校准z角度已完成"))
+
+###### step 1.1.2
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始校准x y位置"))
+while True:
+    frames = pipeline.wait_for_frames()
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.get_depth_frame()
+    color_frame = aligned_frames.get_color_frame()
+    depth_image = np.asanyarray(depth_frame.get_data())
+    color_image = np.asanyarray(color_frame.get_data())
+
+    check, corners = cv2.findChessboardCornersSB(color_image, (3,4))
+
+    if check:
+        averageX = np.average(corners[:, 0, 0])
+        averageY = np.average(corners[:, 0, 1])
+        print(averageX, averageY)
+        # cv2.circle(color_image, (int(averageX), int(averageY)), 3, (0,0,255),2)
+    else:
+        print("\033[1;31;40m%s\033[0m" % (getTime()+" 无法找到校准棋盘格"))
+        continue
+
+    centerScreenX = 640/2
+    centerScreenY = 265  #480
+    deltaX = centerScreenX - averageX
+    deltaY = centerScreenY - averageY
+    MAX_ERROR = 10
+    if abs(deltaX) < MAX_ERROR:
+        deltaX = 0
+    if abs(deltaY) < MAX_ERROR:
+        deltaY = 0
+    if deltaX == 0 and deltaY == 0:
+        break
+    # send
+    msg = 'action:move;relativePos:%s,%s,0,0,0,0'%(deltaY/3, deltaX/3) ### need further test
+    conn.sendall((msg+'\n').encode())
+    # recv
+    recv_msg = conn.recv(1024)
+    recv_msg = recv_msg.decode()
+    infos = recv_msg.split(';')
+    # print(infos)
+    for info in infos:
+        label, value = info.split(':')
+        if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+            print('ok @ 1.1.2a')
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 校准x y位置已完成"))
+
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始校准z位置"))
+while True:
+    frames = pipeline.wait_for_frames()
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.get_depth_frame()
+    color_frame = aligned_frames.get_color_frame()
+    depth_image = np.asanyarray(depth_frame.get_data())
+    color_image = np.asanyarray(color_frame.get_data())
+    height, width = depth_image.shape
+
+    check, corners = cv2.findChessboardCornersSB(color_image, (3,4))
+    print('after find cb')
+    if check:
+        averageX = np.average(corners[:, 0, 0])
+        averageY = np.average(corners[:, 0, 1])
+        # print(averageX, averageY)
+        # cv2.circle(color_image, (int(averageX), int(averageY)), 3, (0,0,255),2)
+    else:
+        print("\033[1;31;40m%s\033[0m" % (getTime()+" 无法找到校准棋盘格"))
+        continue
+
+    color_profile = color_frame.get_profile()
+    cvsprofile = rs.video_stream_profile(color_profile)
+    color_intrin = cvsprofile.get_intrinsics()
+    cornerDepth = []
+    for corner in corners:
+        x = round(corner[0][0]) # x是列坐标
+        y = round(corner[0][1]) # y是行坐标
+        cornerDepth.append(rs.rs2_deproject_pixel_to_point(color_intrin, (x, y), depth_image[y][x]*depth_scale)[2]) 
+    # print(cornerDepth)
+    averageZ = np.mean(cornerDepth)
+    # if np.max(cornerDepth)-np.min(cornerDepth) > 0.0025:
+    #     continue
+    planeHeight = averageZ/depth_scale
+    deltaZ = planeHeight - 240
+    MAX_ERROR = 10
+    if deltaZ < MAX_ERROR:
+        break
+    # send
+    msg = 'action:move;relativePos:0,0,%s,0,0,0'%(-deltaZ) ### need further test
+    conn.sendall((msg+'\n').encode())
+    # recv
+    recv_msg = conn.recv(1024)
+    recv_msg = recv_msg.decode()
+    infos = recv_msg.split(';')
+    # print(infos)
+    for info in infos:
+        label, value = info.split(':')
+        if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+            print('ok @ 1.1.2b')
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "planeHeight", planeHeight))
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 校准z位置已完成"))
+
+#### step 1.2
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始识别、选取抓取点"))
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始识别零件"))
+# preprocessing
+color_image_backup = color_image.copy()
+grayImg = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
+threshImg = cv2.adaptiveThreshold(grayImg, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 41, 1)
+# morphology
+kernelSize = 7
+kernel = np.ones((kernelSize,kernelSize),np.uint8)
+threshImg = cv2.morphologyEx(threshImg, cv2.MORPH_OPEN, kernel)
+threshImg = cv2.morphologyEx(threshImg, cv2.MORPH_CLOSE, kernel)
+# find contours
+contours, hierarchy = cv2.findContours(threshImg.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+contour_Areas = []
+for contour in contours:
+    contour_Areas.append((contour, cv2.contourArea(contour)))
+contour_Areas.sort(key=lambda x: x[1], reverse=True)
+
+partImgs = []
+for contour, area in contour_Areas:
+    if area < 500:
+        break
+    cv2.drawContours(color_image, [contour], -1, (0,0,255), 2)
+    partImg = PartImg()
+    ## find bounding box
+    partImg.bx, partImg.by, partImg.bw, partImg.bh = cv2.boundingRect(contour)
+    partImg.contour = contour
+    partImg.centerX = partImg.bx + partImg.bw / 2
+    partImg.centerY = partImg.by + partImg.bh / 2
+    rate = 0.7
+    partImg.roix = min(max(int(partImg.centerX-partImg.bw*rate), 0), width)
+    partImg.roiy = min(max(int(partImg.centerY-partImg.bh*rate), 0), height)
+    partImg.roiw = min(max(int(partImg.centerX+partImg.bw*rate), 0), width)-partImg.roix
+    partImg.roih = min(max(int(partImg.centerY+partImg.bh*rate), 0), height)-partImg.roiy
+    partImg.rgbRoi = color_image_backup[partImg.roiy:partImg.roiy+partImg.roih, partImg.roix:partImg.roix+partImg.roiw]
+    if partImg.roiw != 0 and partImg.roih != 0:
+        # it is a legal cutting
+        predictions, index = partsClassifier.getPrediction(partImg.rgbRoi)
+        print(predictions)
+        print(indexMap[index])
+        partImg.type = index
+        M = cv2.moments(contour)
+        partImg.gCenterx = int(M["m10"]/M["m00"])
+        partImg.gCentery = int(M["m01"]/M["m00"])
+        (partImg.mx,partImg.my),(partImg.mw,partImg.mh),partImg.ma = cv2.minAreaRect(contour)
+        cv2.putText(color_image, indexMap[index], (partImg.bx, partImg.by), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,0,0), 5)              
+        partImgs.append(partImg)
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "len(partImgs)", len(partImgs)))
+
+# cv2.imshow('out',color_image)
+# cv2.waitKey(0)
+# cv2.destroyAllWindows()
+
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 识别零件完成"))
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始移动机器人"))
+# select a target part
+targetType = 2
+for partImg in partImgs:
+    if partImg.type == targetType:
+        targetImg = partImg
+        print('part found!')
+        break
+else:
+    print('no such part found!')
+    exit(2)
+
+# get the target part's position to the camera coordinate
+# partPos2Cam = rs.rs2_deproject_pixel_to_point(color_intrin, 
+#     (targetImg.centerX, targetImg.centerY), planeHeight)
+
+# TODO: change it to the robot's hand coordinate
+
+
+# TODO: move the robot's hand to the target pos, and descend
+
+
+
+# scan the specific roi in the image and identify the part, 
+# and select the pick up point
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 开始选取抓取点"))
+
+### select pickup point
+
+
+if targetType == 2:
+    # nut
+    print(targetImg.gCenterx, targetImg.gCentery)
+    pickupPointx = targetImg.gCenterx
+    pickupPointy = targetImg.gCentery
+    pickupAngle = targetImg.ma
+    print(targetImg.ma)
+elif targetType == 1 or targetType == 0:
+    # long / short
+    points = cv2.boxPoints(((targetImg.mx,targetImg.my),(targetImg.mw,targetImg.mh),targetImg.ma))
+    distance01 = ((points[0][0]-points[1][0])**2+(points[0][1]-points[1][1])**2)**0.5
+    distance12 = ((points[1][0]-points[2][0])**2+(points[1][1]-points[2][1])**2)**0.5
+    offsetValue = 0.125 if targetType == 0 else 0.25
+    if distance01 > distance12:
+        ## 01 ,23 is the longer side
+        ## 12, 03 is the shorter side
+        print('01')
+        longMidPoint1x = (points[0][0]+points[1][0])/2 
+        longMidPoint1y = (points[0][1]+points[1][1])/2 
+        longMidPoint2x = (points[2][0]+points[3][0])/2 
+        longMidPoint2y = (points[2][1]+points[3][1])/2 
+        cnt03 = np.array([[[*points[0]]],[[*points[3]]],[[longMidPoint2x,longMidPoint2y]],[[longMidPoint1x,longMidPoint1y]]], dtype=np.float32)
+        if cv2.pointPolygonTest(cnt03, (targetImg.gCenterx,targetImg.gCentery), False) > 0:
+            ## at 03 side
+            print('03')
+            shortMidPoint03x = (points[0][0]+points[3][0])/2 
+            shortMidPoint03y = (points[0][1]+points[3][1])/2 
+            vector01x = points[1][0]-points[0][0] 
+            vector01y = points[1][1]-points[0][1] 
+            pickupPointx = shortMidPoint03x + offsetValue * vector01x
+            pickupPointy = shortMidPoint03y + offsetValue * vector01y
+        else:
+            ## at 12 side
+            print('12')
+            shortMidPoint12x = (points[2][0]+points[1][0])/2 
+            shortMidPoint12y = (points[2][1]+points[1][1])/2 
+            vector23x = points[3][0]-points[2][0] 
+            vector23y = points[3][1]-points[2][1] 
+            pickupPointx = shortMidPoint12x + offsetValue * vector23x
+            pickupPointy = shortMidPoint12y + offsetValue * vector23y
+    else:
+        print('12')
+        ## 12 ,03 is the longer side
+        ## 01 ,23 is the shorter side
+        longMidPoint1x = (points[0][0]+points[3][0])/2 
+        longMidPoint1y = (points[0][1]+points[3][1])/2 
+        longMidPoint2x = (points[2][0]+points[1][0])/2 
+        longMidPoint2y = (points[2][1]+points[1][1])/2 
+        cnt01 = np.array([[[*points[0]]],[[*points[1]]],[[longMidPoint2x,longMidPoint2y]],[[longMidPoint1x,longMidPoint1y]]], dtype=np.float32)
+        k = (points[0][1]-points[1][1])/(points[0][0]-points[1][0])
+        angle = np.arctan(k)
+        if cv2.pointPolygonTest(cnt01, (targetImg.gCenterx,targetImg.gCentery), False) > 0:
+            ## at 01 side
+            print('01')
+            shortMidPoint01x = (points[0][0]+points[1][0])/2 
+            shortMidPoint01y = (points[0][1]+points[1][1])/2 
+            vector12x = points[2][0]-points[1][0] 
+            vector12y = points[2][1]-points[1][1] 
+            pickupPointx = shortMidPoint01x + offsetValue * vector12x
+            pickupPointy = shortMidPoint01y + offsetValue * vector12y
+        else:
+            ## at 23 side
+            print('23')
+            shortMidPoint01x = (points[2][0]+points[3][0])/2 
+            shortMidPoint01y = (points[2][1]+points[3][1])/2 
+            vector21x = points[1][0]-points[2][0] 
+            vector21y = points[1][1]-points[2][1] 
+            pickupPointx = shortMidPoint01x + offsetValue * vector21x
+            pickupPointy = shortMidPoint01y + offsetValue * vector21y
+
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "pickupPointx", pickupPointx))
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "pickupPointy", pickupPointy))
+print("\033[0;36m%s%s = %s\033[0m" % ("Console: ", "pickupAngle", pickupAngle))
+
+print("\033[0;32m%s\033[0m" % (getTime()+" Debug: 选取抓取点完成"))
+
+# get the pickupPoint x and y (camera coordinate)
+cameraX, cameraY, _ = rs.rs2_deproject_pixel_to_point(color_intrin, 
+    (pickupPointx, pickupPointy), planeHeight)
+print(cameraX, cameraY, _)
+color_image = cv2.circle(color_image, (pickupPointx,pickupPointy), 2, (255,255,255))
+# cv2.imshow('pickup', color_image)
+# cv2.waitKey(0)
+# cv2.destroyAllWindows()
+# TODO: change it to the robot coordinate
+# TODO: move the robot again to approach it
+
+# send
+msg = 'action:move;relativePos:%s,%s,0,0,0,0'%(105-cameraY, 34-cameraX) ### need further test
+conn.sendall((msg+'\n').encode())
+# recv
+recv_msg = conn.recv(1024)
+recv_msg = recv_msg.decode()
+infos = recv_msg.split(';')
+# print(infos)
+for info in infos:
+    label, value = info.split(':')
+    if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+        print('ok @ 1.2.2')
+# send
+msg = 'action:move;relativePos:0,0,0,%s,0,0'%(np.deg2rad(pickupAngle)) ### need further test
+conn.sendall((msg+'\n').encode())
+# recv
+recv_msg = conn.recv(1024)
+recv_msg = recv_msg.decode()
+infos = recv_msg.split(';')
+# print(infos)
+for info in infos:
+    label, value = info.split(':')
+    if label == 'action' and value == 'complete': # 客户端只可能是action:complete
+        print('ok @ 1.2.2')
